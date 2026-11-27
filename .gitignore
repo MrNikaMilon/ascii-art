@@ -1,0 +1,19 @@
+# Python bytecode and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local dependencies and environment settings
+/.test-runtime/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editor and OS metadata
+/.idea/
+.DS_Store
