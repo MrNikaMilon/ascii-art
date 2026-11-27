@@ -1,0 +1,25 @@
+# HTTPS front door for Last Fly Standing.
+# SITE_ADDRESS is the server's public IP (or a hostname such as 1-2-3-4.sslip.io).
+# Let's Encrypt only issues IP certificates with the 6-day "shortlived" profile;
+# Caddy renews them automatically. For a hostname, ACME_PROFILE=classic works too.
+
+{
+	# Browsers send no SNI when connecting to a bare IP, so tell Caddy
+	# which certificate to use for those connections.
+	default_sni {$SITE_ADDRESS}
+}
+
+{$SITE_ADDRESS} {
+	tls {
+		issuer acme {
+			profile {$ACME_PROFILE:shortlived}
+		}
+	}
+	encode zstd gzip
+	reverse_proxy game:8080
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
