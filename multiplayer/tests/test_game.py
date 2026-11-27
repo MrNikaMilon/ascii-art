@@ -13,16 +13,22 @@ import game as g  # noqa: E402
 from app import ROOMS, app, clean_name  # noqa: E402
 
 
-def started(n=2):
-    game = g.Game(random.Random(1))
-    players = [game.add_player(f"P{i}") for i in range(n)]
-    assert game.start(players[0].id)
+def started_room(n=2):
+    room = g.Game(random.Random(1))
+    players = [room.add_player(f"P{i}") for i in range(n)]
+    assert room.start(players[0].id)
     for _ in range(int(g.COUNTDOWN_SECONDS / g.TICK) + 2):
-        game.tick()
+        room.tick()
+    return room, players
+
+
+def started(n=2):
+    room, players = started_room(n)
+    game = room.arena
     assert game.phase == g.PLAYING
     game.spawn_timer = 10**9
     game.tongue_timer = 10**9
-    return game, players
+    return game, [game.flies[p.id] for p in players]
 
 
 def test_only_host_starts():
@@ -40,14 +46,17 @@ def test_room_accepts_more_than_six_players_with_unique_names_and_colors():
     assert all(len(p.name) <= 12 for p in players)
     assert len({p.color for p in players}) == 30
     assert game.start(players[0].id)
-    assert len(game.alive()) == 30
+    assert len(game.arena.alive()) == 30
 
 
 @pytest.mark.parametrize("n", [1, 2, 3, 6, 7, 30])
 def test_players_spawn_evenly_on_both_sides_of_centered_man(n):
     game = g.Game()
-    players = [game.add_player(f"P{i}") for i in range(n)]
-    assert game.start(players[0].id)
+    host = game.add_player("P0")
+    for i in range(1, n):
+        game.add_player(f"P{i}")
+    assert game.start(host.id)
+    players = game.arena.alive()
     left = [p for p in players if p.x + g.FLY_W <= g.MAN_X]
     right = [p for p in players if p.x >= g.MAN_X + g.MAN_W]
     assert len(left) == n // 2 and len(right) == (n + 1) // 2
@@ -86,7 +95,7 @@ def test_flies_cannot_enter_man_from_any_side(start, direction, expected):
 
 def test_solo_attempt_runs_until_hit_then_restarts_with_full_boss_health():
     game, (player,) = started(1)
-    game.set_input(player.id, 1, 0)
+    player.dx = 1
     old_x = player.x
     for _ in range(30):
         game.tick()
@@ -104,8 +113,10 @@ def test_solo_attempt_runs_until_hit_then_restarts_with_full_boss_health():
 
 
 def test_player_joining_solo_enters_multiplayer_next_round():
-    game, (host,) = started(1)
-    guest = game.add_player("Guest")
+    room, (host_player,) = started_room(1)
+    guest_player = room.add_player("Guest")
+    game = room.arena
+    host, guest = game.flies[host_player.id], game.flies[guest_player.id]
     game.tick()
     assert game.phase == g.PLAYING and host.alive and not guest.alive
     game._eliminate(host, "hit")
@@ -116,14 +127,15 @@ def test_player_joining_solo_enters_multiplayer_next_round():
 
 
 def test_solo_disconnect_can_rejoin_next_attempt():
-    game, (player,) = started(1)
-    game.disconnect(player.id)
+    room, (player,) = started_room(1)
+    game = room.arena
+    room.disconnect(player.id)
     game.tick()
     assert game.phase == g.ROUND_OVER and game.boss_hp == g.BOSS_MAX_HP
-    assert game.reconnect(player.token) is player
+    assert room.reconnect(player.token) is player
     for _ in range(int(g.ROUND_OVER_SECONDS / g.TICK) + 2):
         game.tick()
-    assert game.phase == g.COUNTDOWN and player.alive
+    assert game.phase == g.COUNTDOWN and game.flies[player.id].alive
 
 
 def test_fast_arrow_cannot_skip_a_fly():
@@ -208,7 +220,7 @@ def test_spawns_cover_all_directions_and_stay_clear():
         for p in (a, b):
             assert (abs(p.center[0] - arrow.x) >= g.SPAWN_CLEAR_X or
                     abs(p.center[1] - arrow.y) >= g.SPAWN_CLEAR_Y)
-        assert not g.Arrow.in_catch_zone(arrow.x, arrow.y)
+        assert not g.BOSS_LAYOUT.in_catch_zone(arrow.x, arrow.y)
     assert seen == set(g.DIRECTIONS)
 
 
@@ -240,18 +252,18 @@ def test_man_intercepts_fast_arrows_before_they_hit_players_behind_him(dx):
 
 
 def test_catch_zone_is_limited_to_man_body():
-    assert g.Arrow.in_catch_zone(g.MOUTH_X, g.MOUTH_Y)
-    assert not g.Arrow.in_catch_zone(g.MAN_X - 1, g.MOUTH_Y)
-    assert not g.Arrow.in_catch_zone(g.MAN_X + g.MAN_W, g.MOUTH_Y)
-    assert not g.Arrow.in_catch_zone(g.MOUTH_X, g.MAN_TOP - 1)
-    assert not g.Arrow.in_catch_zone(g.MOUTH_X, g.MAN_BOTTOM + 1)
+    assert g.BOSS_LAYOUT.in_catch_zone(g.MOUTH_X, g.MOUTH_Y)
+    assert not g.BOSS_LAYOUT.in_catch_zone(g.MAN_X - 1, g.MOUTH_Y)
+    assert not g.BOSS_LAYOUT.in_catch_zone(g.MAN_X + g.MAN_W, g.MOUTH_Y)
+    assert not g.BOSS_LAYOUT.in_catch_zone(g.MOUTH_X, g.MAN_TOP - 1)
+    assert not g.BOSS_LAYOUT.in_catch_zone(g.MOUTH_X, g.MAN_BOTTOM + 1)
 
 
 def strike(game, near, move, react_delay=0.0):
     """Run one tongue attack; the fly starts moving react_delay after the lock."""
     game.tongue_timer = 0
     game.tick()
-    assert game.tongue_state == "warn" and game.tongue_target == near.id
+    assert game.tongue_state == "warn" and game.tongue_target is near
     since_lock = None
     for _ in range(60):
         if game.tongue_state == "warn" and game.tongue_timer <= g.TONGUE_LOCK:
@@ -320,7 +332,7 @@ def test_tongue_keeps_initial_wait_and_warning_throughout_fight(elapsed):
 def test_arrows_ramp_smoothly_over_two_minutes_and_stop_at_double_difficulty():
     speeds, gaps = [], []
     for elapsed in [0, 1, 30, 60, 90, 119, 120, 600, 10000]:
-        game = g.Game(random.Random(7))
+        game = g.Arena(g.BOSS_BATTLE, g.BOSS_LAYOUT, random.Random(7))
         game.elapsed = elapsed
         game.spawn_timer = 0
         game._spawn_arrows(0)
@@ -370,31 +382,35 @@ def test_last_surviving_player_keeps_fighting_boss():
     game._eliminate(players[2], "x")
     game.tick()
     assert game.phase == g.PLAYING and players[0].alive and game.boss_hp > 0
-    assert game.attack(players[0].id)
+    assert game.attack(players[0].player.id)
 
 
 def test_disconnect_loses_round_then_rejoins_next_round():
-    game, players = started(3)
-    gone = players[2]
-    game.disconnect(gone.id)
-    assert not gone.alive
-    assert game.reconnect(gone.token) is gone
+    room, members = started_room(3)
+    game = room.arena
+    players = [game.flies[p.id] for p in members]
+    gone = members[2]
+    room.disconnect(gone.id)
+    assert not game.flies[gone.id].alive
+    assert room.reconnect(gone.token) is gone
     game._eliminate(players[1], "x")
     game._eliminate(players[0], "x")
     game.tick()
     for _ in range(int(g.ROUND_OVER_SECONDS / g.TICK) + 2):
         game.tick()
-    assert game.phase == g.COUNTDOWN and gone.alive
+    assert game.phase == g.COUNTDOWN and game.flies[gone.id].alive
 
 
 def test_refresh_during_countdown_keeps_the_match():
-    game = g.Game(random.Random(1))
-    a, b = game.add_player("A"), game.add_player("B")
-    assert game.start(a.id)
-    game.disconnect(b.id)
+    room = g.Game(random.Random(1))
+    host, guest = room.add_player("A"), room.add_player("B")
+    assert room.start(host.id)
+    room.disconnect(guest.id)
+    game = room.arena
+    a, b = game.flies[host.id], game.flies[guest.id]
     game.tick()
     assert game.phase == g.COUNTDOWN and a.alive and not b.alive
-    assert game.reconnect(b.token) is b
+    assert room.reconnect(guest.token) is guest
     for _ in range(int(g.COUNTDOWN_SECONDS / g.TICK) + 2):
         game.tick()
     assert game.phase == g.PLAYING and a.alive and not b.alive
@@ -410,6 +426,98 @@ def test_host_moves_when_host_leaves():
     a, b = game.add_player("A"), game.add_player("B")
     game.disconnect(a.id)
     assert game.host_id == b.id and a.id not in game.players
+
+
+def test_rotates_each_minute_and_resumes_both_arenas():
+    room, (a, b) = started_room()
+    boss = room.arena
+    boss.spawn_timer = boss.tongue_timer = 10**9
+    assert room.snapshot()["mode_seconds"] == 60
+    for _ in range(round(room.mode_remaining / g.TICK) - 1):
+        room.tick()
+    assert room.arena is boss
+    assert room.snapshot()["mode_seconds"] == 1
+
+    boss.boss_hp = 231
+    boss.arrows.append(g.Arrow(0.0, 1.0, 30.0, 1))
+    boss.tongue_state = "warn"
+    boss.tongue_target = boss.flies[b.id]
+    boss.tongue_timer = g.TONGUE_WARN
+    room.set_input(a.id, 1, 0)
+    assert room.attack(a.id)
+    room.tick()
+    saved_boss = boss.snapshot()
+    boss_timing = (boss.elapsed, boss.tongue_timer, boss.spawn_timer, boss.flies[a.id].next_attack_at)
+    boss_rng = boss.rng.getstate()
+
+    survival = room.arena
+    state = room.snapshot()
+    assert state["mode"] == g.SURVIVAL and state["mode_seconds"] == 60
+    assert state["arena"] == {"width": 100, "height": 30, "man_x": 1, "man_y": 8, "fly_min_x": 24}
+    assert state["boss"] is None and state["target"] == 3
+    assert [p["id"] for p in state["players"]] == [a.id, b.id]
+    room.tick(g.COUNTDOWN_SECONDS)
+    assert not room.attack(a.id)
+    survival._eliminate(survival.flies[b.id], "hit")
+    room.tick()
+    assert survival.flies[a.id].wins == 1
+    for _ in range(round(room.mode_remaining / g.TICK) - 1):
+        room.tick()
+    room.tick()
+    assert room.arena is boss and room.snapshot()["mode_seconds"] == 60
+    assert boss.snapshot() == saved_boss
+    assert boss_timing == (boss.elapsed, boss.tongue_timer, boss.spawn_timer, boss.flies[a.id].next_attack_at)
+    assert boss.rng.getstate() == boss_rng
+    assert boss.flies[a.id].dx == 0 and not room.attack(a.id)
+
+    saved_survival = survival.snapshot()
+    for _ in range(round(g.MODE_SECONDS / g.TICK)):
+        room.tick()
+    assert room.arena is survival
+    assert survival.snapshot() == saved_survival
+
+
+def test_survival_draw_replays_and_three_round_wins_end_match():
+    room, (a, b) = started_room()
+    room.tick(room.mode_remaining)
+    arena = room.arena
+    one, two = arena.flies[a.id], arena.flies[b.id]
+    arena.tick(g.COUNTDOWN_SECONDS)
+    arena._eliminate(one, "hit")
+    arena._eliminate(two, "hit")
+    arena.tick()
+    assert arena.phase == g.ROUND_OVER and one.wins == two.wins == 0
+    arena.tick(g.ROUND_OVER_SECONDS)
+    assert arena.phase == g.COUNTDOWN and arena.round == 1
+    for wins in range(1, g.WINS_TO_TAKE_MATCH + 1):
+        arena.tick(g.COUNTDOWN_SECONDS)
+        arena._eliminate(two, "hit")
+        arena.tick()
+        assert one.wins == wins
+        arena.tick(g.ROUND_OVER_SECONDS)
+    assert arena.phase == g.MATCH_OVER and arena.message == f"{a.name} wins the match!"
+
+    boss = room.arenas[g.BOSS_BATTLE]
+    saved_boss = boss.snapshot()
+    remaining = room.mode_remaining
+    assert room.start(a.id)
+    assert arena.phase == g.COUNTDOWN and one.wins == two.wins == 0
+    assert room.mode_remaining == remaining and boss.snapshot() == saved_boss
+
+
+def test_solo_survival_practice_admits_new_players_next_round():
+    room, (host,) = started_room(1)
+    room.tick(room.mode_remaining)
+    arena = room.arena
+    room.tick(g.COUNTDOWN_SECONDS)
+    assert arena.phase == g.PLAYING and room.snapshot()["practice"]
+    guest = room.add_player("Guest")
+    assert not arena.flies[guest.id].alive
+    arena._eliminate(arena.flies[host.id], "hit")
+    room.tick()
+    assert arena.flies[host.id].wins == 0
+    room.tick(g.ROUND_OVER_SECONDS)
+    assert arena.flies[guest.id].alive and not room.snapshot()["practice"]
 
 
 def test_clean_name_strips_control_chars():
@@ -473,39 +581,39 @@ def test_websocket_room_accepts_more_than_six_players():
 
 def test_attack_cooldown_is_half_a_second_and_spam_is_ignored():
     game, (player,) = started(1)
-    assert game.attack(player.id)
+    assert game.attack(player.player.id)
     for _ in range(100):
-        assert not game.attack(player.id)
+        assert not game.attack(player.player.id)
     assert len(game.balls) == 1 and game.boss_hp == 300
     for _ in range(14):
         game.tick()
-    assert not game.attack(player.id)
+    assert not game.attack(player.player.id)
     game.tick()
-    assert game.attack(player.id)
+    assert game.attack(player.player.id)
 
 
 def test_attack_cooldown_is_independent_for_each_player_and_survives_reconnect():
-    game, (a, b) = started()
-    assert game.attack(a.id) and game.attack(b.id)
-    assert len(game.balls) == 2
-    assert game.reconnect(a.token) is a
-    assert not game.attack(a.id)
+    room, (a, b) = started_room()
+    assert room.attack(a.id) and room.attack(b.id)
+    assert len(room.arena.balls) == 2
+    assert room.reconnect(a.token) is a
+    assert not room.attack(a.id)
 
 
 @pytest.mark.parametrize("phase", [g.LOBBY, g.COUNTDOWN, g.ROUND_OVER, g.MATCH_OVER])
 def test_attack_is_rejected_outside_combat(phase):
     game, (player,) = started(1)
     game.phase = phase
-    assert not game.attack(player.id)
+    assert not game.attack(player.player.id)
     assert not game.balls and game.boss_hp == 300
 
 
 def test_dead_disconnected_and_unknown_players_cannot_attack():
     game, (a, b) = started()
     a.alive = False
-    b.connected = False
-    assert not game.attack(a.id)
-    assert not game.attack(b.id)
+    b.player.connected = False
+    assert not game.attack(a.player.id)
+    assert not game.attack(b.player.id)
     assert not game.attack(99999)
     assert not game.balls
 
@@ -517,7 +625,7 @@ def test_dead_disconnected_and_unknown_players_cannot_attack():
 def test_ball_flies_toward_boss_from_every_side_and_deals_one_damage(start):
     game, (player,) = started(1)
     player.x, player.y = start
-    assert game.attack(player.id)
+    assert game.attack(player.player.id)
     ball = game.balls[0]
     x, y = ball.x, ball.y
     distance_before = math.hypot(x - (g.MAN_X + g.MAN_W / 2),
@@ -540,7 +648,7 @@ def test_ball_flies_toward_boss_from_every_side_and_deals_one_damage(start):
 def test_fast_ball_cannot_skip_boss_and_does_not_damage_other_players():
     game, (a, b) = started()
     b.x, b.y = 50.0, float(g.MOUTH_Y - 1)
-    game.balls = [g.Ball(20.0, float(g.MOUTH_Y), 10000.0, 0.0, a.color)]
+    game.balls = [g.Ball(20.0, float(g.MOUTH_Y), 10000.0, 0.0, a.player.color)]
     game.tick()
     assert game.boss_hp == 299 and not game.balls and a.alive and b.alive
 
@@ -548,7 +656,7 @@ def test_fast_ball_cannot_skip_boss_and_does_not_damage_other_players():
 def test_three_hundred_hits_win_and_rematch_resets_health_projectiles_and_cooldowns():
     game, (player,) = started(1)
     for _ in range(300):
-        assert game.attack(player.id)
+        assert game.attack(player.player.id)
         for _ in range(15):
             game.tick()
     for _ in range(120):
@@ -557,19 +665,19 @@ def test_three_hundred_hits_win_and_rematch_resets_health_projectiles_and_cooldo
             break
     assert game.boss_hp == 0 and game.phase == g.MATCH_OVER
     assert game.message == "Victory! Тимур defeated!"
-    assert not game.attack(player.id) and not game.balls and not game.arrows
+    assert not game.attack(player.player.id) and not game.balls and not game.arrows
     assert game.snapshot()["boss"]["hp"] == 0
-    assert game.start(player.id)
+    game.start()
     assert game.boss_hp == 300 and not game.balls
     for _ in range(int(g.COUNTDOWN_SECONDS / g.TICK) + 2):
         game.tick()
-    assert game.attack(player.id)
+    assert game.attack(player.player.id)
 
 
 def test_simultaneous_final_hits_cannot_reduce_boss_health_below_zero():
     game, (a, b) = started()
     game.boss_hp = 1
-    game.balls = [g.Ball(float(g.MOUTH_X), float(g.MOUTH_Y), 1.0, 0.0, p.color)
+    game.balls = [g.Ball(float(g.MOUTH_X), float(g.MOUTH_Y), 1.0, 0.0, p.player.color)
                   for p in (a, b)]
     game.tick()
     assert game.boss_hp == 0 and game.phase == g.MATCH_OVER and not game.balls
@@ -581,8 +689,9 @@ def test_websocket_attack_uses_server_cooldown_and_publishes_boss_health():
         with client.websocket_connect(f"/ws/{code}") as ws:
             ws.send_json({"t": "join", "name": "Shooter"})
             welcome = ws.receive_json()
-            game = ROOMS[code].game
-            assert game.start(welcome["id"])
+            room = ROOMS[code].game
+            assert room.start(welcome["id"])
+            game = room.arena
             game.timer = 0.0
             game.tick()
             game.spawn_timer = game.tongue_timer = 10**9

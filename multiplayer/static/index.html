@@ -42,6 +42,8 @@ input {
 #hud { position: absolute; top: max(8px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); right: max(12px, env(safe-area-inset-right)); z-index: 2;
   display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; background: rgba(7, 9, 10, .78); border-radius: 3px; }
 .party { display: flex; align-items: center; gap: 12px; }
+#modeHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#modeTimer { color: var(--accent); white-space: nowrap; }
 #bossBar { width: min(100%, 600px); align-self: center; }
 .boss-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 4px; font-size: 13px; }
 .boss-label strong { color: var(--danger); letter-spacing: 3px; }
@@ -51,6 +53,7 @@ input {
 #scores { display: flex; gap: 6px 14px; flex: 1; flex-wrap: wrap; min-width: 0; max-height: 20vh; overflow: auto; }
 .score { white-space: nowrap; font-size: 13px; }
 .score.out { opacity: .45; text-decoration: line-through; }
+.pips { margin-left: 6px; letter-spacing: 2px; }
 #stageWrap { position: absolute; inset: 0; }
 #stage { position: absolute; inset: 0; }
 canvas { display: block; width: 100%; height: 100%; background: #07090a; }
@@ -87,7 +90,7 @@ canvas { display: block; width: 100%; height: 100%; background: #07090a; }
    ( ᴗ )            <b>'=(_)='</b>      <i>&lt;==8</i>
   /ТИМУР\            <b>/ V \</b>   <i>&lt;==8</i></div>
     <h1>Last Fly Standing</h1>
-    <p class="lead" id="lead">Dodge the arrows. Escape Тимур's tongue. Defeat the boss together.</p>
+    <p class="lead" id="lead">Fight Тимур together, then race to be the last fly standing. Modes switch every minute.</p>
     <form id="joinForm">
       <label for="name">Your nickname</label>
       <div class="row">
@@ -101,6 +104,7 @@ canvas { display: block; width: 100%; height: 100%; background: #07090a; }
 
 <main id="play" hidden>
   <header id="hud">
+    <div id="modeHeader"><strong id="modeLabel"></strong><span id="modeTimer"></span></div>
     <div id="bossBar">
       <div class="boss-label"><strong>ТИМУР</strong><span id="bossHp">300 / 300 HP</span></div>
       <div id="bossHealth" role="progressbar" aria-label="Тимур HP" aria-valuemin="0" aria-valuemax="300" aria-valuenow="300"><div id="bossFill"></div></div>
@@ -132,14 +136,13 @@ canvas { display: block; width: 100%; height: 100%; background: #07090a; }
   <button data-d="left" aria-label="Left">←</button><span></span><button data-d="right" aria-label="Right">→</button>
   <span></span><button data-d="down" aria-label="Down">↓</button><span></span>
 </div>
-<button id="attackBtn" type="button" aria-label="Shoot at Тимур" disabled>● Fire</button>
+<button id="attackBtn" type="button" aria-label="Shoot at Тимур" hidden disabled>● Fire</button>
 
 <script>
 "use strict";
-const W = 200, H = 60, FLY_W = 7, FLY_H = 4, SPEED_X = 38, SPEED_Y = 19;
+const FLY_W = 7, FLY_H = 4, SPEED_X = 38, SPEED_Y = 19;
 const MAN_W = 21, MAN_H = 13;
-const MAN_X = Math.floor((W - MAN_W) / 2), MAN_Y = Math.floor((H - MAN_H) / 2);
-const MOUTH_X = MAN_X + 10, MOUTH_Y = MAN_Y + 5;
+const MODE_LABELS = { boss: "Boss Fight", survival: "Last Fly Standing" };
 const ATTACK_COOLDOWN_MS = 500;
 const COLORS = ["#4ade80", "#38bdf8", "#f472b6", "#c084fc", "#fb923c", "#f5f5f4"];
 const playerColor = index => COLORS[index] || `hsl(${(index * 137.508) % 360} 75% 70%)`;
@@ -227,12 +230,18 @@ function connect(name) {
     const message = JSON.parse(event.data);
     if (message.t === "welcome") {
       myId = message.id; retry = 0;
+      state = null; predicted = null;
       store.set("sessionStorage", tokenKey(), message.token);
       $("shareLink").value = `${location.origin}/r/${message.code}`;
       $("status").textContent = "";
       showPlay();
     } else if (message.t === "state") {
-      state = message; updateUi();
+      const modeChanged = state?.mode !== message.mode;
+      const roundStarted = message.phase === "countdown" && state?.phase !== message.phase;
+      state = message;
+      if (modeChanged) { predicted = null; resize(); }
+      if (modeChanged || roundStarted) syncInput(true);
+      updateUi();
     } else if (message.t === "error") {
       fatal = true;
       if (message.reason === "not_found") {
@@ -264,14 +273,14 @@ function send(message) {
 function attack() {
   const me = state?.players.find(p => p.id === myId);
   const now = performance.now();
-  if (state?.phase !== "playing" || !me?.alive || now < nextAttackAt) return;
+  if (state?.mode !== "boss" || state.phase !== "playing" || !me?.alive || now < nextAttackAt) return;
   if (send({ t: "attack" })) nextAttackAt = now + ATTACK_COOLDOWN_MS;
 }
-function syncInput() {
+function syncInput(force = false) {
   const dx = (held.has("right") ? 1 : 0) - (held.has("left") ? 1 : 0);
   const dy = (held.has("down") ? 1 : 0) - (held.has("up") ? 1 : 0);
-  if (dx !== sentDx || dy !== sentDy) {
-    sentDx = dx; sentDy = dy; send({ t: "input", dx, dy });
+  if (force || dx !== sentDx || dy !== sentDy) {
+    if (send({ t: "input", dx, dy })) { sentDx = dx; sentDy = dy; }
   }
 }
 const KEYS = { ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down", ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right" };
@@ -313,11 +322,20 @@ function updateUi() {
   const me = state.players.find(p => p.id === myId);
   const isHost = state.host === myId;
   const connected = state.players.filter(p => p.connected).length;
-  $("roundLabel").textContent = state.round ? `Attempt ${state.round}` : "Lobby";
-  $("bossHp").textContent = `${state.boss.hp} / ${state.boss.max_hp} HP`;
-  $("bossFill").style.width = `${100 * state.boss.hp / state.boss.max_hp}%`;
-  $("bossHealth").setAttribute("aria-valuenow", state.boss.hp);
-  $("bossHealth").setAttribute("aria-valuemax", state.boss.max_hp);
+  const survival = state.mode === "survival";
+  const nextMode = MODE_LABELS[survival ? "boss" : "survival"];
+  $("modeLabel").textContent = MODE_LABELS[state.mode];
+  $("modeTimer").textContent = state.mode_seconds === null ? "" : `${nextMode} in ${state.mode_seconds}s`;
+  const roundName = state.practice ? "Practice" : survival ? "Round" : "Attempt";
+  $("roundLabel").textContent = state.round ? `${roundName} ${state.round}` : "Lobby";
+  $("bossBar").hidden = survival;
+  $("attackBtn").hidden = survival;
+  if (state.boss) {
+    $("bossHp").textContent = `${state.boss.hp} / ${state.boss.max_hp} HP`;
+    $("bossFill").style.width = `${100 * state.boss.hp / state.boss.max_hp}%`;
+    $("bossHealth").setAttribute("aria-valuenow", state.boss.hp);
+    $("bossHealth").setAttribute("aria-valuemax", state.boss.max_hp);
+  }
 
   const scores = $("scores");
   scores.replaceChildren(...state.players.map(p => {
@@ -326,6 +344,13 @@ function updateUi() {
     el.className = "score" + ((racing && !p.alive) || !p.connected ? " out" : "");
     el.style.color = playerColor(p.color);
     el.textContent = p.name + (p.id === myId ? " (you)" : "") + (p.id === state.host ? " ★" : "");
+    if (survival) {
+      const pips = document.createElement("span");
+      pips.className = "pips";
+      pips.textContent = "●".repeat(p.wins) + "○".repeat(state.target - p.wins);
+      pips.setAttribute("aria-label", `${p.wins} of ${state.target} wins`);
+      el.append(pips);
+    }
     return el;
   }));
 
@@ -340,7 +365,7 @@ function updateUi() {
       : `${connected} players here. ` + (isHost ? "Start when everyone is in." : "Waiting for the host to start."));
     $("startBtn").hidden = !isHost;
     $("startBtn").disabled = connected < 1;
-    $("startBtn").textContent = over ? "Rematch" : "Start match";
+    $("startBtn").textContent = over ? "Rematch this mode" : "Start match";
   }
   $("count").hidden = state.phase !== "countdown";
   if (state.phase === "countdown") $("count").textContent = Math.max(1, Math.ceil(state.timer));
@@ -348,13 +373,18 @@ function updateUi() {
   $("banner").hidden = !banner; $("banner").textContent = banner;
 
   if ($("status").textContent.startsWith("Connection")) return;
-  if (state.phase === "playing" && me && !me.alive) $("status").textContent = "You're out. Spectating until the next attempt.";
+  if (state.phase === "playing" && me && !me.alive) $("status").textContent = `You're out. Spectating until the next ${survival ? "round" : "attempt"}.`;
   else if (state.feed) $("status").textContent = state.feed;
-  else if (state.phase === "playing") $("status").textContent = "Arrows / WASD to move · Space to shoot";
+  else if (state.phase === "playing") $("status").textContent = survival
+    ? (state.practice ? "Arrows / WASD to move · Practice until the next round with two players"
+      : `Arrows / WASD to move · First to ${state.target} wins`)
+    : "Arrows / WASD to move · Space to shoot";
   else $("status").textContent = "";
 }
 
 function resize() {
+  if (!state) return;
+  const { width: W, height: H } = state.arena;
   const wrap = $("stageWrap").getBoundingClientRect();
   if (!wrap.width || !wrap.height) return;
   cw = wrap.width / W;
@@ -373,6 +403,8 @@ function put(text, col, row, color) {
   }
 }
 function drawTongue(t, time) {
+  const { width: W, man_x: manX, man_y: manY } = state.arena;
+  const mouthX = manX + 10, mouthY = manY + 5;
   if (t.state === "warn") {
     const [x, y] = t.spot;
     // Blinks while tracking; turns solid red when the aim locks: move now!
@@ -382,13 +414,13 @@ function drawTongue(t, time) {
     put(label, Math.max(0, Math.min(W - label.length, x - Math.floor(label.length / 2))), y >= 4 ? y - 4 : y + 3, color);
   } else if (["extend", "hold", "retract"].includes(t.state)) {
     const [tx, ty] = t.tip;
-    const steps = Math.max(Math.abs(tx - MOUTH_X), Math.abs(ty - MOUTH_Y), 1);
+    const steps = Math.max(Math.abs(tx - mouthX), Math.abs(ty - mouthY), 1);
     for (let i = 1; i <= steps; i++) {
-      const col = Math.round(MOUTH_X + (tx - MOUTH_X) * i / steps);
-      const row = Math.round(MOUTH_Y + (ty - MOUTH_Y) * i / steps);
+      const col = Math.round(mouthX + (tx - mouthX) * i / steps);
+      const row = Math.round(mouthY + (ty - mouthY) * i / steps);
       put(i === steps ? "@" : "~", col, row, "#f87171");
     }
-    if (t.state !== "retract" && (tx !== MOUTH_X || ty !== MOUTH_Y)) {   // matches TONGUE_SPLASH in game.py
+    if (t.state !== "retract" && (tx !== mouthX || ty !== mouthY)) {   // matches TONGUE_SPLASH in game.py
       put("@@@", tx - 1, ty - 1, "#ef4444");
       put("@@@@@", tx - 2, ty, "#ef4444");
       put("@@@", tx - 1, ty + 1, "#ef4444");
@@ -396,16 +428,17 @@ function drawTongue(t, time) {
   }
 }
 // Keep prediction aligned with move_fly() on the server, including the central obstacle.
-function moveFly(pos, dx, dy, dt) {
-  let x = Math.max(0, Math.min(W - FLY_W, pos.x + dx * SPEED_X * dt));
-  if (pos.y < MAN_Y + MAN_H && pos.y + FLY_H > MAN_Y) {
-    if (pos.x + FLY_W <= MAN_X && x + FLY_W > MAN_X) x = MAN_X - FLY_W;
-    else if (pos.x >= MAN_X + MAN_W && x < MAN_X + MAN_W) x = MAN_X + MAN_W;
+function moveFly(pos, dx, dy, dt, layout) {
+  const { width, height, man_x: manX, man_y: manY, fly_min_x: flyMinX } = layout;
+  let x = Math.max(flyMinX, Math.min(width - FLY_W, pos.x + dx * SPEED_X * dt));
+  if (pos.y < manY + MAN_H && pos.y + FLY_H > manY) {
+    if (pos.x + FLY_W <= manX && x + FLY_W > manX) x = manX - FLY_W;
+    else if (pos.x >= manX + MAN_W && x < manX + MAN_W) x = manX + MAN_W;
   }
-  let y = Math.max(0, Math.min(H - FLY_H, pos.y + dy * SPEED_Y * dt));
-  if (x < MAN_X + MAN_W && x + FLY_W > MAN_X) {
-    if (pos.y + FLY_H <= MAN_Y && y + FLY_H > MAN_Y) y = MAN_Y - FLY_H;
-    else if (pos.y >= MAN_Y + MAN_H && y < MAN_Y + MAN_H) y = MAN_Y + MAN_H;
+  let y = Math.max(0, Math.min(height - FLY_H, pos.y + dy * SPEED_Y * dt));
+  if (x < manX + MAN_W && x + FLY_W > manX) {
+    if (pos.y + FLY_H <= manY && y + FLY_H > manY) y = manY - FLY_H;
+    else if (pos.y >= manY + MAN_H && y < manY + MAN_H) y = manY + MAN_H;
   }
   return { x, y };
 }
@@ -413,25 +446,25 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(.05, (now - lastFrame) / 1000); lastFrame = now;
   if (!state || $("play").hidden) return;
-  $("attackBtn").disabled = state.phase !== "playing" ||
-    !state.players.find(p => p.id === myId)?.alive || now < nextAttackAt;
+  const { width: W, height: H, man_x: manX, man_y: manY } = state.arena;
+  const me = state.players.find(p => p.id === myId);
+  $("attackBtn").disabled = state.mode !== "boss" || state.phase !== "playing" || !me?.alive || now < nextAttackAt;
   ctx.clearRect(0, 0, W * cw, H * ch);
   ctx.font = `${Math.min(cw / .6, ch)}px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
 
   const face = FACES[state.face] || {};
-  const bossColor = state.boss.hp === 0 ? "#64748b" : state.boss.hit ? "#f87171" : "#e7e2d8";
-  MAN.forEach((line, i) => put(face[i] || line, MAN_X, MAN_Y + i, bossColor));
+  const bossColor = state.boss?.hp === 0 ? "#64748b" : state.boss?.hit ? "#f87171" : "#e7e2d8";
+  MAN.forEach((line, i) => put(face[i] || line, manX, manY + i, bossColor));
   state.balls.forEach(([x, y, color]) => put("●", x, y, playerColor(color)));
   state.arrows.forEach(([x, y, d]) => {
     const [dx, dy, art] = ARROWS[d];
     for (let i = 0; i < art.length; i++) put(art[i], x - i * dx, y - i * dy, "#fde047");
   });
 
-  const me = state.players.find(p => p.id === myId);
   if (me?.alive && state.phase === "playing") {
     if (!predicted) predicted = { x: me.x, y: me.y };
-    predicted = moveFly(predicted, sentDx, sentDy, dt);
+    predicted = moveFly(predicted, sentDx, sentDy, dt, state.arena);
     const pull = Math.min(1, dt * 10);
     predicted.x += (me.x - predicted.x) * pull; predicted.y += (me.y - predicted.y) * pull;
   } else predicted = null;
